@@ -6,11 +6,27 @@ import * as z from "zod";
 import clerkClient from "@clerk/clerk-sdk-node";
 import ora, { Ora } from "ora";
 
+enum HashingAlgorithms {
+  argon2i = "argon2i",
+  argon2id = "argon2id",
+  bcrypt = "bcrypt",
+  md5 = "md5",
+  pbkdf2Sha256 = "pbkdf2_sha256",
+  pbkdf2Sha256Django = "pbkdf2_sha256_django",
+  pbkdf2Sha1 = "pbkdf2_sha1",
+  scryptFirebase = "scrypt_firebase",
+}
+
+const hasherSchema = z.nativeEnum(HashingAlgorithms);
+
 const SECRET_KEY = process.env.CLERK_SECRET_KEY;
 const DELAY = parseInt(process.env.DELAY_MS ?? `1_000`);
 const RETRY_DELAY = parseInt(process.env.RETRY_DELAY_MS ?? `10_000`);
 const IMPORT_TO_DEV = process.env.IMPORT_TO_DEV_INSTANCE ?? "false";
 const OFFSET = parseInt(process.env.OFFSET ?? `0`);
+const PASSWORD_HASHER = hasherSchema.parse(
+  process.env.PASSWORD_HASHER ?? HashingAlgorithms.bcrypt
+);
 
 if (!SECRET_KEY) {
   throw new Error(
@@ -30,18 +46,7 @@ const userSchema = z.object({
   firstName: z.string().optional(),
   lastName: z.string().optional(),
   password: z.string().optional(),
-  passwordHasher: z
-    .enum([
-      "argon2i",
-      "argon2id",
-      "bcrypt",
-      "md5",
-      "pbkdf2_sha256",
-      "pbkdf2_sha256_django",
-      "pbkdf2_sha1",
-      "scrypt_firebase",
-    ])
-    .optional(),
+  phoneNumber: z.array(z.string()).optional(),
 });
 
 type User = z.infer<typeof userSchema>;
@@ -53,8 +58,9 @@ const createUser = (userData: User) =>
         emailAddress: [userData.email],
         firstName: userData.firstName,
         lastName: userData.lastName,
+        phoneNumber: userData.phoneNumber,
         passwordDigest: userData.password,
-        passwordHasher: userData.passwordHasher,
+        passwordHasher: PASSWORD_HASHER,
       })
     : clerkClient.users.createUser({
         externalId: userData.userId,
@@ -116,15 +122,35 @@ async function main() {
   console.log(`Clerk User Migration Utility`);
 
   const inputFileName = process.argv[2] ?? "users.json";
+  const phoneInputFileName = process.argv[3] ?? "users-phone-numbers.json";
 
   console.log(`Fetching users from ${inputFileName}`);
 
   const parsedUserData: any[] = JSON.parse(
     fs.readFileSync(inputFileName, "utf-8")
   );
-  const offsetUsers = parsedUserData.slice(OFFSET);
+  const parsedUserPhoneNumbers: any[] = JSON.parse(
+    fs.readFileSync(phoneInputFileName, "utf-8")
+  );
+
+  const parsedUsersWithPhoneNumbers: User[] = parsedUserData.map((user) => {
+    const userWithPhoneNumber = parsedUserPhoneNumbers.find(
+      (userPhoneNumber) => userPhoneNumber.id === user.userId
+    );
+
+    if (!userWithPhoneNumber?.phone) {
+      return user;
+    }
+
+    return {
+      ...user,
+      phoneNumber: [String(userWithPhoneNumber.phone)],
+    };
+  });
+
+  const offsetUsers = parsedUsersWithPhoneNumbers.slice(OFFSET);
   console.log(
-    `users.json found and parsed, attempting migration with an offset of ${OFFSET}`
+    `${inputFileName} and ${phoneInputFileName} found and parsed, attempting migration with an offset of ${OFFSET}`
   );
 
   let i = 0;
